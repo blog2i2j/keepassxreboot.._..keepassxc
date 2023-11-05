@@ -105,25 +105,7 @@ bool TouchID::setKey(const QUuid& dbUuid, const QByteArray& passwordKey)
         return true;
     }
 
-    // generate random AES 256bit key and IV
-    QByteArray randomKey = randomGen()->randomArray(SymmetricCipher::keySize(SymmetricCipher::Aes256_GCM));
-    QByteArray randomIV = randomGen()->randomArray(SymmetricCipher::defaultIvSize(SymmetricCipher::Aes256_GCM));
-
-    SymmetricCipher aes256Encrypt;
-    if (!aes256Encrypt.init(SymmetricCipher::Aes256_GCM, SymmetricCipher::Encrypt, randomKey, randomIV)) {
-        debug("TouchID::setKey - AES initialisation failed");
-        return false;
-    }
-
-    // encrypt and keep result in memory
-    QByteArray encryptedMasterKey = passwordKey;
-    if (!aes256Encrypt.finish(encryptedMasterKey)) {
-        debug("TouchID::getKey - AES encrypt failed: %s", aes256Encrypt.errorString().toUtf8().constData());
-        return false;
-    }
-
-    const QString keyName = databaseKeyName(dbUuid);
-
+    const auto keyName = databaseKeyName(dbUuid);
     deleteKeyEntry(keyName); // Try to delete the existing key entry
 
     // prepare adding secure entry to the macOS KeyChain
@@ -160,38 +142,25 @@ bool TouchID::setKey(const QUuid& dbUuid, const QByteArray& passwordKey)
     NSString *accountName = keyName.toNSString(); // The NSString is released by Qt
 
     // prepare data (key) to be stored
-    QByteArray keychainKeyValue = (randomKey + randomIV).toHex();
-    CFDataRef keychainValueData =
-        CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, reinterpret_cast<UInt8 *>(keychainKeyValue.data()),
-                                    keychainKeyValue.length(), kCFAllocatorDefault);
+    CFDataRef masterKeyValueData = 
+        CFDataCreateWithBytesNoCopy(kCFAllocatorDefault, reinterpret_cast<UInt8 *>(encryptedMasterKey.data()), 
+                                    encryptedMasterKey.length(), kCFAllocatorDefault);
 
     CFMutableDictionaryRef attributes = makeDictionary();
     CFDictionarySetValue(attributes, kSecClass, kSecClassGenericPassword);
     CFDictionarySetValue(attributes, kSecAttrAccount, (__bridge CFStringRef) accountName);
-    CFDictionarySetValue(attributes, kSecValueData, (__bridge CFDataRef) keychainValueData);
+    CFDictionarySetValue(attributes, kSecValueData, (__bridge CFDataRef) masterKeyValueData);
     CFDictionarySetValue(attributes, kSecAttrSynchronizable, kCFBooleanFalse);
     CFDictionarySetValue(attributes, kSecUseAuthenticationUI, kSecUseAuthenticationUIAllow);
     CFDictionarySetValue(attributes, kSecAttrAccessControl, sacObject);
 
     // add to KeyChain
     OSStatus status = SecItemAdd(attributes, NULL);
-    LogStatusError("TouchID::setKey - Status adding new entry", status);
 
     CFRelease(sacObject);
     CFRelease(attributes);
 
-    if (status != errSecSuccess) {
-        return false;
-    }
-
-    // Cleanse the key information from the memory
-    Botan::secure_scrub_memory(randomKey.data(), randomKey.size());
-    Botan::secure_scrub_memory(randomIV.data(), randomIV.size());
-
-    // memorize which database the stored key is for
-    m_encryptedMasterKeys.insert(dbUuid, encryptedMasterKey);
-    debug("TouchID::setKey - Success!");
-    return true;
+    return status == errSecSuccess;
 }
 
 /**
